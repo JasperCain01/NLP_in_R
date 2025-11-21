@@ -1,0 +1,487 @@
+---
+title: "Natural Language Processing in R - Assessment"
+format: html
+editor: visual
+author: Jasper Cain
+embed-resources: true
+date: today
+warnings: false
+
+echo: true
+toc: true
+toc-location: left
+toc-title: "Navigation"
+---
+
+## Introduction
+
+The purpose of the assessment is to demonstrate what skills have been learned as part of an NLP using R course. The data-set is from a sample of newspaper articles from a British left-leaning newspaper, "The Guardian", chosen because they mention key words related to Health and Social Care.
+
+The exact methodology for choosing the sample of articles is not known.
+
+This assessment will look to answer:
+
+**What can different NLP analysis methods tell us about the priorities and writing styles of different journalists?**
+
+```{r libraries}
+#| output: false
+library(tidyverse) # for tidy programming style
+library(tidytext) # for unnesting tokens and other NLP functions
+library(wordcloud2) # for wordclouds
+library(textstem) # for stemma of words
+library(udpipe) # for POS tagging
+library(fmsb) # for radar charts
+
+```
+
+```{r download_data}
+#| output: FALSE
+# only necessary if not already downloaded
+
+if(length(list.files("guardian_data/"))==5){
+  "files already downloaded" } else {
+  dir.create("guardian_data")
+ file_path_without_ending='https://raw.githubusercontent.com/drpawelo/data/refs/heads/main/health/nlp_guardian_batch_'
+for (batch_id in 1:5) {
+remote_file_name <- paste0(file_path_without_ending, batch_id, ".csv")
+local_file_name <- paste0("guardian_data/guardian_articles_", batch_id, ".csv")}
+if (!file.exists(local_file_name)){
+	  download.file(remote_file_name, local_file_name) }
+ }
+
+                      
+```
+
+```{r read_data}
+#| output: FALSE
+# read the data into R
+
+df_guardian_articles <- map(
+  map(list.files("guardian_data/"),
+    function(x){paste0("guardian_data/",x)}),
+  read_csv) %>%
+  list_rbind()
+```
+
+## Pre-processing and understanding the data
+
+The data consists of 19,172 articles. The earliest was published the 01/01/2023 and the latest on 17/11/2024. This period covers several newsworthy events which would have an impact on Health, not least including the General Election, Resident Doctor and Nurse Strikes, and the Covid Inquiry.
+
+Most articles come from the "news" category, although there is a good spread across all sections of the newspaper.
+
+### Spread of Article Types
+
+```{r initial_data_plots}
+
+ggplot(df_guardian_articles,
+       aes(x=pillarId)) +
+  geom_bar() + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  labs(title="Types of Article")
+
+ggplot(df_guardian_articles) +
+  geom_bar(aes(x=sectionId)) + 
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  labs(title="Newpaper Sections")
+
+
+
+```
+
+### Authors
+
+```{r author_articles}
+
+ # articles by author
+ author_articles <- df_guardian_articles %>%
+   group_by(fields.byline) %>%
+   summarise("number_of_articles"=n()) %>%
+   arrange(desc(number_of_articles))
+ 
+ 
+```
+
+There are 5,378 unique bylines/authors attributed to this dataset.
+
+A quick review of the data shows that articles with no byline appear to be comments from members of the public, not articles by guardian journalists.
+
+They have been excluded to try and ensure that the data is more representative of the editorial output of the guardian newspaper itself.
+
+In order to focus the analysis on large sample sizes, we will further limit our analysis to bylines with over 100 articles.
+
+```{r authors_over_100}
+author_articles %>% filter(number_of_articles>=100) %>%
+  filter(!is.na(fields.byline))
+```
+
+Excluding the generic bylines "Editorial" and "Guardian staff and agencies" leaves 12 authors.
+
+```{r df_articles_reduced}
+df_articles_reduced <- df_guardian_articles %>% 
+  filter(fields.byline %in% unique(
+    author_articles %>% 
+      filter(number_of_articles>=100) %>%
+      filter(!is.na(fields.byline)) %>%
+  filter(!fields.byline %in% c("","Editorial","Guardian staff and agencies")))$fields.byline)
+
+df_articles_reduced %>%
+  group_by(fields.byline) %>%
+  summarise(number_of_articles=n())
+
+```
+
+These authors cover a spread of the newpapers sections, although there is a higher proportion of articles within the politics, society, uk-news and world sections.
+
+```{r byline_sections}
+df_articles_reduced %>% 
+  group_by(fields.byline,sectionId) %>%
+  summarise(number_of_articles=n()) %>%
+  ggplot(aes(x=fields.byline,
+             y=number_of_articles,
+             fill=sectionId)) +
+  geom_col() +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  labs(title="Newspaper Sections of Most Prolific Bylines")
+
+```
+
+It is worth noting that this reduced cohort of authors produce almost entirely "news" output, instead of Opinions, Art or Lifestyle.
+
+```{r byline_types}
+df_articles_reduced %>% 
+  group_by(sectionId,pillarId) %>%
+  summarise(number_of_articles=n()) %>%
+  ggplot(aes(x=sectionId,
+             y=number_of_articles,
+             fill=pillarId)) +
+  geom_col() +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  labs(title = "Article Types From Most Prolific Bylines")
+```
+
+## Writing Styles
+
+### Sentence length
+
+I wanted to understand the length of the average sentence for each author. This identified some variation.
+
+However, not all words are created equal, so I wanted to remove standard stop words and leave only an approximation of the most meaningful words in each article.
+
+```{r sentence_lengths}
+f_removeWords <- function(str) {
+  x <- unlist(strsplit(str, " "))
+  paste(x[!x %in% unique(stop_words$word)], collapse = " ")
+} #function to remove stop_words from each sentence
+
+
+df_sentence_length <- df_articles_reduced %>% 
+  group_by(fields.byline) %>%
+  unnest_tokens(input=fields.text,token = "sentences",output = sentence) %>%
+  mutate(sentence_length = str_count(sentence, boundary("word"))) %>%
+  summarise("mean_original" = mean(sentence_length)) %>%
+  left_join(
+ df_articles_reduced %>% 
+  group_by(fields.byline) %>%
+  unnest_tokens(input=fields.text,token = "sentences",output = sentence) %>%
+      mutate(sentence2=sapply(sentence,f_removeWords)) %>%
+  mutate(sentence_length2 = str_count(sentence2, boundary("word"))) %>%
+  summarise("mean_without_stopwords" = mean(sentence_length2))) %>%
+  mutate(percentage_words_removed =round(1-(mean_without_stopwords/mean_original),2))
+
+df_sentence_length %>%
+  pivot_longer(cols = mean_original:mean_without_stopwords,
+               values_to = "sentence_length",
+               names_to = "sentence_type") %>%
+  mutate(fields.byline = fct_reorder(fields.byline,desc(percentage_words_removed))) %>% 
+  ggplot() +
+  geom_col(aes(x=fields.byline,
+               y=sentence_length,
+               fill=sentence_type),
+               position=position_dodge()) +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  labs(title = "Meaningful words per sentence")
+```
+
+There is a difference between the number of stop-words used in articles by journalists. The biggest difference on a sentence-by-sentence basis are articles by John Crace. Removing stop-words from his articles reduced average words per sentence by 59%. Not bad when being paid by the word....
+
+Graeme Wearden uses the least "filler" words. Only 44% of his sentences, on average, are stop-words.
+
+This is obviously a very crude measure of the impact of writing, and stop-words are important for context and clarity. However, significant differences suggest that some authors could be more concise with their writing.
+
+## Author Topics
+
+### Wordclouds
+
+To identify common themes in articles, I started by using a wordcloud to visualise commonly used words.
+
+Some initial issues which have meant more cleansing was needed included:
+
+-   Some (but not all) articles start with the time of publishing
+
+-   numbers are commonly used, but mean nothing in isolation
+
+Other measures taken are:
+
+-   lemmatising words to make as consistent as possible
+
+-   removing stopwords to focus on most meaningful words
+
+-   reduce words to top 100 to focus on most obvious themes
+
+```{r wordclouds}
+f_byline_word_freq <- function(byline){
+ df_articles_reduced %>%
+    filter(fields.byline==byline) %>%
+    mutate(lemma_text=sapply(fields.text, lemmatize_strings)) %>%
+    mutate(clean_text=
+    str_remove_all(
+    str_remove_all(
+    str_remove_all(
+    str_remove_all(
+    str_remove_all(
+        lemma_text,
+      "(\\d+)"), #remove digits
+      "GMT\\s+"), #remove greewich mean time
+      "BST\\s+"), #remove british summer time
+    "\\s+pm\\s+"), #remove pm (time)
+    "\\s+am\\s+") #remove am (time)
+    ) %>%
+    unnest_tokens(output = word,input = clean_text) %>%
+    anti_join(stop_words) %>%
+    count(word,sort=TRUE) %>%
+    rename(freq=n) %>%
+    top_n(100) 
+}
+
+f_wordclouds <- function(byline){
+  f_byline_word_freq(byline) %>% 
+    wordcloud2()
+}
+  
+```
+
+::: panel-tabset
+### Graeme Wearden
+
+```{r wordcloud_1}
+f_wordclouds("Graeme Wearden")
+```
+
+### Andrew Sparrow
+
+```{rwordcloud_2}
+f_wordclouds("Andrew Sparrow")
+```
+
+### Denis Campbell Health policy editor
+
+```{r wordcloud_3}
+f_wordclouds("Denis Campbell Health policy editor")
+```
+
+### Rachel Hall
+
+```{r wordcloud_4}
+f_wordclouds("Rachel Hall")
+```
+
+### Archie Bland
+
+```{r wordcloud_5}
+f_wordclouds("Archie Bland")
+```
+
+### Nadeem Badshah
+
+```{r wordcloud_6}
+f_wordclouds("Nadeem Badshah")
+```
+
+### Nicola Davis Science correspondent
+
+```{r wordcloud_7}
+f_wordclouds("Nicola Davis Science correspondent")
+```
+
+### Andrew Gregory Health editor
+
+```{r wordcloud_8}
+f_wordclouds("Andrew Gregory Health editor")
+```
+
+### Nimo Omer
+
+```{r wordcloud_9}
+f_wordclouds("Nimo Omer")
+```
+
+### Jamie Grierson
+
+```{r wordcloud_10}
+f_wordclouds("Jamie Grierson")
+```
+
+### Steven Morris
+
+```{r wordcloud_11}
+f_wordclouds("Steven Morris")
+```
+
+### John Crace
+
+```{r wordcloud_12}
+f_wordclouds("John Crace" )
+```
+:::
+
+### ngrams
+
+For a clearer analysis, I also undertook a basic frequency analysis of the top 5 words and bi-grams for each author, providing an easier format for comparison.
+
+I did not cleanse the articles of anything except the vanilla stopwords for these charts.
+
+#### Top 5 Words per Author
+
+It is possible to intuit what types of journalists each author may be from these, although the "daily briefings" mask any insights from some journalists.
+
+```{r ngram_words}
+df_articles_reduced %>%
+  group_by(fields.byline) %>%
+unnest_tokens(output = word,input = fields.headline) %>%
+  anti_join(stop_words) %>%
+  count(word,sort=TRUE) %>% 
+  top_n(5) %>%
+  ggplot(aes(x=word,y=n)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~fields.byline, scales="free")+
+  scale_x_discrete(guide = guide_axis(angle = 90)) -> word_freq_C
+  
+(word_freq_C)
+```
+
+#### Top 5 Bi-grams per Author
+
+There are many more bigrams which are of equal frequency compared to single words for each author. Like the word frequency analysis, it is clear to see what further cleanisng would be needed to make this more useful - e.g. Friday Briefings.
+
+```{r ngram_bigrams}
+df_articles_reduced %>%
+  group_by(fields.byline) %>%
+unnest_tokens(output = ngram,input = fields.headline, token = "ngrams",n=2) %>%
+  separate(ngram, into = c("first","second"),
+           sep = " ", remove = FALSE) %>%
+  anti_join(stop_words,
+            by = c("first" = "word")) %>%
+  anti_join(stop_words,
+            by = c("second" = "word")) %>%
+  count(ngram,sort=TRUE) %>% 
+  top_n(5) %>%
+  ggplot(aes(x=ngram,y=n)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~fields.byline, scales="free")+
+  scale_x_discrete(guide = guide_axis(angle = 90)) -> bigram_freq_C
+  
+(bigram_freq_C)
+```
+
+## Author Styles
+
+I have analysed how each author uses language differently, particularly the balance between word types.
+
+Further work could be done in this space to include research about how emotive or engaging different authors are based on their use of language and sentence structure. Research could also take place looking at whether an author changes how they write depending if it is a news, opinion, or lifestyle piece.
+
+```{r udpipe_model}
+# Only download model if not previously done, it is a large file.
+
+if(!file.exists("language_model/english-ewt-ud-2.5-191206.udpipe")){
+ 
+dir.create("language_model")
+
+udpipe_download_model(language = "english-ewt",            model_dir = "language_model/")
+} else {
+    "model already downloaded"}
+
+
+```
+
+```{r apply_pos_model}
+
+language_model <- udpipe_load_model(file = "language_model/english-ewt-ud-2.5-191206.udpipe")
+
+
+f_annotate_pos <- function(byline){
+  byline_text <- df_articles_reduced %>%
+  filter(fields.byline==byline) %>%
+  select(fields.text) %>%
+  str_squish()
+  
+    udpipe_annotate(language_model, x = byline_text) %>%
+    as.data.frame() %>%
+  mutate(fields.byline=byline)
+}
+
+#Warning, the following function takes significant time, and results in a dataframe of nearly 5 million rows. Consider if you need to adapt the inputs to match your processing power. 
+
+df_annotated_text <- list_rbind(map(unique(df_articles_reduced$fields.byline),f_annotate_pos))
+
+```
+
+```{r pos_chart}
+
+df_reduced_annotated_text <- df_annotated_text %>%
+  filter(upos %in% c("ADJ","ADV","NOUN","NUM","PRON","PROPN","VERB")) %>%
+  mutate(tag_name = case_when(
+    upos=="ADJ" ~ "Adjective",
+    upos=="ADV" ~ "Adverb",
+    upos=="NOUN" ~ "Noun",
+    upos=="NUM" ~ "Number",
+    upos=="PRON" ~ "Pronoun",
+    upos=="PROPN" ~ "Proper Noun",
+    upos=="VERB" ~ "Verb"
+  ))
+
+  df_reduced_annotated_text %>%
+    group_by(fields.byline,tag_name) %>% 
+    summarise(count=n()) %>%
+  left_join(df_reduced_annotated_text %>%
+  group_by(fields.byline,) %>%
+  summarise(total=n())) %>%
+  mutate(proportion=count/total) %>%
+  ggplot() +
+  geom_col(aes(x=fields.byline,
+               y=proportion,
+               fill=tag_name)) +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  labs(title="Language Structures of Different Bylines")
+```
+
+## Author Sentiments
+
+Finally, I looked into how positive or negative a skew was being written into the articles.
+
+To do this, I compared how many negative sentiment words and positive sentiment words were used across the entire corpus of each journalist.
+
+The results show that Andrew Sparrow is the most cheerful journalist, whilst Jamie Grierson seems a bit down.
+
+```{r author_sentiments}
+
+df_articles_reduced %>% unnest_tokens(output = word,input = fields.text) %>%
+ inner_join(get_sentiments("bing")) %>%
+ group_by(fields.byline,sentiment) %>%
+  summarise(count_sentiments=n()) %>%
+  pivot_wider(names_from = sentiment,
+              values_from = count_sentiments) %>%
+  mutate(positive_sentiment=positive/(positive+negative),
+        negative_sentiment=negative/(positive+negative)) %>%
+  select(fields.byline,positive_sentiment,negative_sentiment) %>%
+  pivot_longer(cols = !fields.byline,
+               names_to = "sentiment",
+               values_to = "proportion") %>% ggplot() +
+  geom_col(aes(x=fields.byline,
+               y=proportion,
+               fill=sentiment)) +
+  # geom_col(aes(x=fields.byline,
+  #              y=count_sentiments,
+  #              fill=sentiment)) +
+  scale_x_discrete(guide = guide_axis(angle = 90))
+  
+```
