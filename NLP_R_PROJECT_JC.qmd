@@ -361,7 +361,7 @@ unnest_tokens(output = word,input = fields.headline) %>%
 
 #### Top 5 Bi-grams per Author
 
-There are many more bigrams which are of equal frequency compared to single words for each author. Like the word frequency analysis, it is clear to see what further cleanisng would be needed to make this more useful - e.g. Friday Briefings.
+There are many more bi-grams which are of equal frequency compared to single words for each author. Like the word frequency analysis, it is clear to see what further cleansing would be needed to make this more useful - e.g. Friday Briefings.
 
 ```{r ngram_bigrams}
 df_articles_reduced %>%
