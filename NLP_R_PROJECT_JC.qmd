@@ -404,6 +404,7 @@ udpipe_download_model(language = "english-ewt",            model_dir = "language
 ```
 
 ```{r apply_pos_model}
+#| output: false
 
 language_model <- udpipe_load_model(file = "language_model/english-ewt-ud-2.5-191206.udpipe")
 
