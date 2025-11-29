@@ -31,6 +31,8 @@ library(wordcloud2) # for wordclouds
 library(textstem) # for stemma of words
 library(udpipe) # for POS tagging
 library(fmsb) # for radar charts
+library(topicmodels) # for identify common topics
+library(tm) # for creating document term matrices
 
 ```
 
@@ -381,6 +383,56 @@ unnest_tokens(output = ngram,input = fields.headline, token = "ngrams",n=2) %>%
   scale_x_discrete(guide = guide_axis(angle = 90)) -> bigram_freq_C
   
 (bigram_freq_C)
+```
+
+## Topic Modelling
+
+Finally, I used the topicmodels package to pull out the top topic terms for each journalist
+
+```{r}
+
+f_word_removal <- function(byline){
+  removal_patterns<-"(\\d+)|(\\sam\\s)|(\\spm\\s)|(gmt)\\s|(bst)\\s|(afternoon)|(evening)|(early evening)|(summary)|(the\\s)|(says\\s)|(will\\s)|(\\sits\\s)|(said)|(can\\s)|(was\\s)|(not\\s)|(have\\s)|(this\\s)|(their\\s)|(they\\s)|(been\\s)|(are\\s)|(that\\s)|(also\\s)|(had\\s)|(were\\s)|(she\\s)|(her\\s)|(\\sis\\s)|"
+removal_patterns <- paste0(removal_patterns,str_flatten(tm::stopwords("en"),collapse = "\\s|\\s"))
+
+return(df_articles_reduced %>%
+  filter(fields.byline==byline) %>%
+    mutate(
+  fields.text.clean =
+    str_replace_all(
+      str_remove_all(
+        str_to_lower(fields.text),
+        "[[:punct:]]"),
+      removal_patterns,
+      replacement = " ") %>%
+  str_replace_all("\\s+"," ")))
+}
+
+f_byline_corpus<- function(byline){
+  Corpus(
+    VectorSource(
+      f_word_removal(byline)$fields.text.clean))
+}
+
+f_byline_dtm <- function(byline){
+  DocumentTermMatrix(
+    f_byline_corpus(byline))
+}
+
+
+f_topic_model <- function(byline){
+  byline_LDA <- LDA(f_byline_dtm("Rachel Hall"),
+                k=3,
+                control=list(seed=1234))
+  terms(byline_LDA,10) %>%
+    tibble() %>%
+    mutate(byline_name=byline)
+}
+
+
+byline_topics <- list_rbind(map(unique(df_articles_reduced$fields.byline),f_topic_model)) 
+
+byline_topics
 ```
 
 ## Author Styles
